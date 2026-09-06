@@ -35,7 +35,7 @@ class PublishRequest(BaseModel):
 
 
 def _json_safe(value: Any):
-    if isinstance(value, (datetime,)):
+    if isinstance(value, datetime):
         return value.isoformat()
     return value
 
@@ -63,16 +63,40 @@ def nexus_status():
         _ensure_integration_table()
         with conn() as c:
             total = c.execute('SELECT COUNT(*) n FROM apollo_integration_events').fetchone()['n']
+            last_probe = c.execute(
+                "SELECT nexus_message_id,status,created_at FROM apollo_integration_events WHERE message_type='APOLLO.ACCEPTANCE.PING' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
         return {
             'status': 'ready',
             'service': 'UNG-APOLLO',
             'nexus': NEXUS_BASE_URL,
             'inbound': '/v1/nexus/inbound',
             'outbound': '/v1/nexus/publish',
+            'acceptance': '/v1/nexus/acceptance',
             'events': total,
+            'last_acceptance': last_probe,
         }
     except Exception as exc:
         raise HTTPException(503, f'nexus_bridge_unavailable:{type(exc).__name__}')
+
+
+@router.post('/acceptance', status_code=202)
+def nexus_acceptance_probe():
+    _ensure_integration_table()
+    mid = str(uuid4())
+    now = datetime.now(timezone.utc)
+    with conn() as c:
+        event = c.execute(
+            '''INSERT INTO apollo_integration_events
+               (id,nexus_message_id,source_system,target_system,message_type,payload,status,created_at)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+            (
+                str(uuid4()), mid, 'UNG-NEXUS', 'UNG-APOLLO',
+                'APOLLO.ACCEPTANCE.PING', psycopg.types.json.Jsonb({'probe': True}),
+                'accepted', now,
+            ),
+        ).fetchone()
+    return {'accepted': True, 'message_id': mid, 'event': event}
 
 
 @router.post('/inbound', status_code=202)
