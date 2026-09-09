@@ -2,9 +2,11 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
+import json, os, urllib.error, urllib.request
 from app import auth, conn
 
 router=APIRouter(prefix='/v1/kpis',tags=['Planning KPIs'])
+NOVA_BASE_URL=os.getenv('NOVA_BASE_URL','https://ung-nova-production.up.railway.app').rstrip('/')
 def now(): return datetime.now(timezone.utc)
 def ensure_schema():
     with conn() as c:
@@ -29,3 +31,13 @@ def snapshot(authorization:str|None=Header(None)):
     planned=sum(abs(float(r['planned_supply'])) for r in supply)
     if planned>0: obs.append({'kpi_key':'supply_plan_adherence','value':max(0.0,100*(1-sum(abs(float(r['actual_supply'])-float(r['planned_supply'])) for r in supply)/planned)),'entity_id':'enterprise','source_system':'UNG-APOLLO'})
     return {'source_system':'UNG-APOLLO','records':len(rows),'observations':obs,'generated_at':now()}
+@router.post('/supply-chain/publish')
+def publish(authorization:str|None=Header(None)):
+    snap=snapshot(authorization)
+    observations=snap.get('observations') or []
+    if not observations:return {'status':'no-data','inserted':0,'snapshot':snap}
+    req=urllib.request.Request(NOVA_BASE_URL+'/v1/supply-chain/observations/bulk',data=json.dumps({'observations':observations},default=str).encode(),method='POST',headers={'Content-Type':'application/json','X-UNG-Permissions':'nova.datasets.write','User-Agent':'UNG-APOLLO/0.4.1'})
+    try:
+        with urllib.request.urlopen(req,timeout=8) as r:return {'status':'published','response_code':r.status,'nova':json.loads(r.read().decode() or '{}'),'snapshot':snap}
+    except urllib.error.HTTPError as e: raise HTTPException(502,f'nova_http_{e.code}')
+    except Exception as e: raise HTTPException(503,f'nova_unavailable:{type(e).__name__}')
