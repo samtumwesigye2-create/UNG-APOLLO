@@ -28,7 +28,7 @@
 - Invalid coordinates, non-finite numeric weights, zero/negative vehicle limits, or an inverted departure window must return validation errors instead of entering the engine.
 - A principal whose tenant/classification/compartment context does not satisfy the session security label must be denied even when the principal has the route permission string.
 - Required graph data missing must block generation; optional weather/terrain/comms data missing or stale must produce explicit degraded confidence and freshness metadata.
-- Duplicate NEXUS snapshot/event message IDs must be idempotent and must not duplicate route datasets, audit events, candidates, or decisions.
+- Duplicate NEXUS snapshot/event message IDs must be idempotent and must not duplicate route datasets, audit events, candidates, profiles, or decisions.
 - Offline decision synchronization must never replace a human decision with a later system recommendation or silently overwrite an earlier operator rationale.
 
 ---
@@ -36,8 +36,9 @@
 ## File Structure
 
 - `route_models.py` — Pydantic request/response, security, graph, profile, candidate, window, replay models.
-- `route_store.py` — route tables, persistence, security-filtered reads/writes, event/outbox storage.
+- `route_store.py` — route tables, persistence, security-filtered reads/writes, profiles, event/outbox storage.
 - `route_engine.py` — deterministic graph candidate generation, hard constraints, scoring, tie-breaking, explanations.
+- `route_dataset_adapter.py` — merge graph + weather/terrain/geofence/comms snapshots into one immutable normalized planning dataset.
 - `route_windows.py` — departure-window evaluation using stored candidates/data snapshots.
 - `route_replay.py` — replay bundle construction and reproducibility checks.
 - `route_events.py` — NEXUS/SENTINEL event envelopes, durable outbox, retry-safe publishing.
@@ -71,7 +72,7 @@ Expected: FAIL because `route_models` does not exist.
 
 - [ ] **Step 3: Implement the Pydantic models**
 
-Use strict finite numeric validation. `VehicleProfile.mode` is `Literal["ground","air","surface","simulation"]`; route planning remains mode-agnostic and non-weapon. `PreferenceWeights.normalized()` returns a deterministic dictionary whose enabled weights sum to 1.0. `PlanningDataset` includes `dataset_id`, `version`, `source_system`, `observed_at`, `fetched_at`, `required_graph`, optional layer provenance, nodes, and edges.
+Use strict finite numeric validation. `VehicleProfile.mode` is `Literal["ground","air","surface","simulation"]`; route planning remains mode-agnostic and non-weapon. `PreferenceWeights.normalized()` returns a deterministic dictionary whose enabled weights sum to 1.0. `PlanningDataset` includes `dataset_id`, `version`, `source_system`, `observed_at`, `fetched_at`, graph provenance, optional layer provenance, nodes, and edges.
 
 - [ ] **Step 4: Add test dependencies and CI test execution**
 
@@ -84,7 +85,7 @@ Expected: PASS.
 
 Commit: `test: establish APOLLO route planning domain models`
 
-### Task 2: Route persistence and security-scoped storage
+### Task 2: Route persistence, profile catalog, and security-scoped storage
 
 **Files:**
 - Create: `route_store.py`
@@ -93,11 +94,11 @@ Commit: `test: establish APOLLO route planning domain models`
 
 **Interfaces:**
 - Consumes: models from Task 1 and existing `app.conn`.
-- Produces: `ensure_route_schema() -> None`, `create_session(...)`, `get_session(...)`, `save_candidates(...)`, `list_candidates(...)`, `save_windows(...)`, `record_decision(...)`, `append_route_event(...)`, `save_dataset_snapshot(...)`, `get_dataset_snapshot(...)`, `enqueue_outbox(...)`, `list_pending_outbox(...)`, `mark_outbox_delivered(...)`.
+- Produces: `ensure_route_schema() -> None`, `create_session(...)`, `get_session(...)`, `save_candidates(...)`, `list_candidates(...)`, `save_windows(...)`, `record_decision(...)`, `append_route_event(...)`, `save_dataset_snapshot(...)`, `get_dataset_snapshot(...)`, `upsert_vehicle_profile(...)`, `get_vehicle_profile(...)`, `list_vehicle_profiles(...)`, `enqueue_outbox(...)`, `list_pending_outbox(...)`, `mark_outbox_delivered(...)`.
 
 - [ ] **Step 1: Write failing schema/store tests**
 
-Tests pin the five spec tables exactly: `apollo_route_sessions`, `apollo_route_candidates`, `apollo_route_windows`, `apollo_route_decisions`, `apollo_route_events`; add `apollo_route_datasets` for immutable normalized snapshot storage and `apollo_route_outbox` for durable NEXUS/SENTINEL delivery. Test indexes for `plan_id`, `session_id`, `created_at`, candidate lookup, dataset version, and unique outbox/event idempotency key.
+Tests pin the five spec tables exactly: `apollo_route_sessions`, `apollo_route_candidates`, `apollo_route_windows`, `apollo_route_decisions`, `apollo_route_events`; add `apollo_route_datasets` for immutable normalized snapshot storage, `apollo_route_profiles` for versioned vehicle/mission profiles, and `apollo_route_outbox` for durable NEXUS/SENTINEL delivery. Test indexes for `plan_id`, `session_id`, `created_at`, candidate lookup, dataset version, profile ID/version, and unique outbox/event idempotency key.
 
 - [ ] **Step 2: Add security mismatch tests**
 
@@ -105,7 +106,7 @@ Tests pin the five spec tables exactly: `apollo_route_sessions`, `apollo_route_c
 
 - [ ] **Step 3: Implement schema and store functions**
 
-Persist `security_context JSONB` with sessions, datasets, decisions, and route events. Candidate/window access is authorized through the parent session security context. Do not mutate prior decisions; `record_decision` is append-only.
+Persist `security_context JSONB` with sessions, datasets, profiles, decisions, and route events. Candidate/window access is authorized through the parent session security context. Profiles are immutable by `(profile_id, version)`; a newer profile version does not rewrite historical sessions. `record_decision` is append-only.
 
 - [ ] **Step 4: Wire schema startup**
 
@@ -136,7 +137,7 @@ Fixture graph must contain at least three distinct origin-to-destination paths. 
 
 - [ ] **Step 2: Write hard-constraint tests**
 
-Cover forbidden geofence edge, vehicle max range/endurance, route-mode mismatch, required-waypoint ordering, and blocked/unavailable edge. Assert an infeasible path cannot rank above a feasible path regardless of soft weights.
+Cover forbidden geofence edge, vehicle max range/endurance, route-mode mismatch, required-waypoint ordering, elevation/depth limit when the mode uses it, departure-window availability, and blocked/unavailable edge. Assert an infeasible path cannot rank above a feasible path regardless of soft weights.
 
 - [ ] **Step 3: Implement candidate generation**
 
@@ -174,7 +175,7 @@ Commit: `feat: add deterministic explainable route engine`
 
 - [ ] **Step 1: Write failing API permission/lifecycle tests**
 
-Patch JANUS introspection in tests. Assert missing token → 401; missing permission → 403; JANUS unavailable → 503; valid token/session creation → 201; unknown plan/session/candidate → 404. Assert `ung.admin` retains the existing fallback behavior.
+Patch JANUS introspection in tests. Assert missing token → 401; missing permission → 403; JANUS unavailable → 503; valid token/session creation → 201; unknown plan/session/candidate → 404. Assert `ung.admin` retains the existing fallback behavior. Assert a permission-valid principal with an incompatible security label is still denied.
 
 - [ ] **Step 2: Write generation contract tests**
 
@@ -182,11 +183,11 @@ Assert candidate payload contains geometry, metrics, score, score breakdown, fea
 
 - [ ] **Step 3: Implement router and feature flag**
 
-`router = APIRouter(prefix='/v1/routes', tags=['Route Planning'])`. Reject route writes/generation with 404 or 503-style feature-disabled response while `APOLLO_ROUTE_PLANNING_ENABLED` is not truthy; keep health/readiness available.
+`router = APIRouter(prefix='/v1/routes', tags=['Route Planning'])`. Reject route writes/generation with a feature-disabled response while `APOLLO_ROUTE_PLANNING_ENABLED` is not truthy; keep health/readiness available.
 
 - [ ] **Step 4: Register router and system capability**
 
-Include the route router in `entrypoint.py`; add `route-planning` to `/v1/system` capabilities only when the flag is enabled.
+Include the route router in `entrypoint.py`; add `route-planning` to `/v1/system` capabilities only when the flag is enabled. `GET /v1/routes/profiles` reads versioned profiles from Task 2.
 
 - [ ] **Step 5: Run and commit**
 
@@ -195,39 +196,42 @@ Expected: PASS.
 
 Commit: `feat: expose secured APOLLO route planning API`
 
-### Task 5: NEXUS snapshot ingestion, provenance, audit events, and durable outbox
+### Task 5: Real dataset adapter, NEXUS snapshot ingestion, provenance, and durable audit outbox
 
 **Files:**
+- Create: `route_dataset_adapter.py`
 - Create: `route_events.py`
+- Create: `tests/test_route_dataset_adapter.py`
 - Create: `tests/test_route_events.py`
 - Modify: `nexus_bridge.py`
 
 **Interfaces:**
-- Consumes: Task 2 dataset/outbox store and existing `NexusEnvelope`/NEXUS endpoint pattern.
+- Consumes: Task 2 dataset/profile/outbox store and existing `NexusEnvelope`/NEXUS endpoint pattern.
+- Produces: `build_planning_dataset(graph_snapshot, optional_snapshots, profile) -> PlanningDataset`.
 - Produces: `ingest_route_snapshot(message_type, payload, message_id, security_context)`, `queue_route_event(session_id, event_type, payload, security_context, idempotency_key)`, `flush_route_outbox(authorization: str | None) -> dict`.
 
-- [ ] **Step 1: Write failing inbound/idempotency tests**
+- [ ] **Step 1: Write failing graph/layer adapter tests**
 
-Cover `APOLLO.ROUTE.WEATHER_SNAPSHOT`, `TERRAIN_SNAPSHOT`, `GEOFENCE_SNAPSHOT`, `COMMS_SNAPSHOT`, and `VEHICLE_PROFILE_UPDATED`. Every stored datum must retain source, observed/fetched time, version/hash when supplied, quality/confidence, and security context. Duplicate `message_id` must return duplicate=true without a second stored snapshot/event.
+Cover required `APOLLO.ROUTE.GRAPH_SNAPSHOT` plus `WEATHER_SNAPSHOT`, `TERRAIN_SNAPSHOT`, `GEOFENCE_SNAPSHOT`, `COMMS_SNAPSHOT`, and `VEHICLE_PROFILE_UPDATED`. Graph nodes/edges and optional layers must normalize into stable IDs and GeoJSON-like geometry; every source retains source system, observed/fetched time, version/hash when supplied, quality/confidence, and security context.
 
-- [ ] **Step 2: Write outbox/degraded-connectivity tests**
+- [ ] **Step 2: Write missing/stale/duplicate tests**
+
+No graph snapshot → `RouteDataUnavailable`. Missing optional layer when policy permits → dataset produced with degraded confidence and `missing_layers`. Stale layer → freshness age + uncertainty penalty input. Duplicate `message_id` → duplicate=true with no second snapshot/profile/event.
+
+- [ ] **Step 3: Write outbox/degraded-connectivity tests**
 
 When NEXUS is unavailable, `SESSION_CREATED`, `CANDIDATES_GENERATED`, `DECISION_RECORDED`, and `REPLAY_REQUESTED` remain queued. A later successful flush marks delivery without deleting local history. Test that authorization headers are never persisted or logged.
 
-- [ ] **Step 3: Refactor NEXUS publish primitive**
+- [ ] **Step 4: Refactor NEXUS publishing and implement dispatch**
 
-Extract a reusable `publish_envelope(envelope: dict, authorization: str | None) -> dict` from the existing `/v1/nexus/publish` implementation; preserve current public behavior.
-
-- [ ] **Step 4: Implement route snapshot dispatch and audit queueing**
-
-Route-relevant inbound messages call `ingest_route_snapshot`. Security/operator events are persisted to `apollo_route_events` and queued toward the existing NEXUS integration path for SENTINEL consumption; distinguish `system_recommendation` from `human_decision` in event payloads.
+Extract `publish_envelope(envelope: dict, authorization: str | None) -> dict` from the existing `/v1/nexus/publish` implementation and preserve current behavior. Dispatch route snapshots through `ingest_route_snapshot`; build immutable normalized datasets by graph/layer version; queue security/operator events for SENTINEL through NEXUS and distinguish `system_recommendation` from `human_decision`.
 
 - [ ] **Step 5: Run and commit**
 
-Run: `python -m pytest tests/test_route_events.py -v`
+Run: `python -m pytest tests/test_route_dataset_adapter.py tests/test_route_events.py -v`
 Expected: PASS.
 
-Commit: `feat: integrate route planning with NEXUS audit flow`
+Commit: `feat: integrate real route datasets and NEXUS audit flow`
 
 ### Task 6: Departure windows, human decisions, and deterministic replay
 
@@ -261,7 +265,7 @@ Bundle includes normalized request, security label, engine/profile/policy versio
 
 - [ ] **Step 4: Implement windows/replay and API routes**
 
-Replay reads stored outputs first and may optionally recompute for verification; it never alters the historical record.
+Replay reads stored outputs first and may optionally recompute for verification; it never alters the historical record. Replay access repeats the session security-label check.
 
 - [ ] **Step 5: Run and commit**
 
@@ -294,7 +298,7 @@ Desktop-first grid: top mission bar, dominant map canvas, right candidate panel,
 
 - [ ] **Step 3: Implement map interaction without mandatory external renderer**
 
-Use an SVG/Canvas coordinate surface for always-available local interaction and GeoJSON-like route rendering. If `APOLLO_BASEMAP_URL` is configured, the UI may use it as a background layer; absence of a basemap must not disable waypoint editing or route comparison. Support pointer/touch drag for origin/destination/intermediate waypoints and keyboard-focusable controls.
+Use an SVG/Canvas geographic viewport for always-available local interaction and GeoJSON-like route/layer rendering. If `APOLLO_BASEMAP_URL` is configured, the UI may use it as a background; absence of a basemap must not disable lat/lon waypoint editing or route comparison. Support pointer/touch drag for origin/destination/intermediate waypoints and keyboard-focusable controls.
 
 - [ ] **Step 4: Implement Plan / Compare / Replay API flows**
 
@@ -307,7 +311,7 @@ Expected: PASS.
 
 Commit: `feat: add APOLLO route planning workspace`
 
-### Task 8: Observability, acceptance coverage, and release gate
+### Task 8: Observability, disconnected acceptance coverage, and release gate
 
 **Files:**
 - Create: `route_observability.py`
@@ -325,31 +329,31 @@ Commit: `feat: add APOLLO route planning workspace`
 
 - [ ] **Step 1: Write failing acceptance/security tests**
 
-One acceptance fixture must prove: session creation; origin/destination/waypoints; at least two alternatives when graph permits; full metrics/breakdown/explanation; hard-constraint rejection; operator selection/rejection rationale; non-top manual choice preserved; persisted windows; replay provenance; cross-tenant denial; duplicate NEXUS idempotency; stale optional layer degradation; required graph failure; offline queued events; no weapon/engagement request fields accepted.
+One acceptance fixture must prove: session creation; origin/destination/waypoints; at least two alternatives when graph permits; full metrics/breakdown/explanation; hard-constraint rejection; operator selection/rejection rationale; non-top manual choice preserved; persisted windows; replay provenance; cross-tenant/classification/compartment denial; duplicate NEXUS idempotency; stale optional layer degradation; required graph failure; offline queued events; and no weapon/engagement request fields accepted.
 
-- [ ] **Step 2: Add observability hooks**
+- [ ] **Step 2: Add disconnected sync-preservation test**
+
+Create an offline session and human decision, queue outbound events, ingest a later system recommendation/profile/data update, flush the outbox, and assert the original human decision/rationale and timestamps remain append-only and visible in replay.
+
+- [ ] **Step 3: Add observability hooks**
 
 Use monotonic timers around engine, scoring, window, replay, DB, and outbox operations. Emit structured logs with event names and numeric metadata only after authorization; redact/omit request route contents on auth failures.
 
-- [ ] **Step 3: Update readiness/release gate**
+- [ ] **Step 4: Update readiness/release gate and run full verification**
 
-When `APOLLO_ROUTE_PLANNING_ENABLED=true`, readiness reports route schema availability and dataset/outbox state. Keep the feature disabled by default. Document that enabling requires JANUS route permissions and successful CI acceptance tests.
-
-- [ ] **Step 4: Run full verification**
-
-Run: `python -m pytest -q`
-Expected: all tests PASS.
-
-Run: `python -m py_compile app.py entrypoint.py nexus_bridge.py planning_kpis.py route_models.py route_store.py route_engine.py route_windows.py route_replay.py route_events.py route_api.py route_ui.py route_observability.py`
-Expected: exit 0.
-
-Build: `docker build -t ung-apollo-route-v1 .`
-Expected: exit 0.
+When `APOLLO_ROUTE_PLANNING_ENABLED=true`, readiness reports route schema availability and dataset/outbox state. Keep the feature disabled by default. Run `python -m pytest -q`, then `python -m py_compile app.py entrypoint.py nexus_bridge.py planning_kpis.py route_models.py route_store.py route_engine.py route_dataset_adapter.py route_windows.py route_replay.py route_events.py route_api.py route_ui.py route_observability.py`, then `docker build -t ung-apollo-route-v1 .`; all must exit 0.
 
 - [ ] **Step 5: Commit**
 
 Commit: `test: gate APOLLO route planning V1 release`
 
+## Self-Review Result
+
+- **Spec coverage:** Route schema/API, deterministic generation/scoring, real graph/layer normalization, NEXUS/JANUS/SENTINEL integration, security labels, departure windows, replay, explainability, failure behavior, observability, map-first UI, disconnected outbox behavior, feature flag, and acceptance criteria all have owning tasks.
+- **Type consistency:** All later tasks consume models/store/engine interfaces named in earlier tasks; profile persistence is explicit and historical versions remain immutable.
+- **Review Focus coverage:** Validation → Task 1; label mismatch → Tasks 2/4; missing/stale layers → Tasks 3/5; duplicate NEXUS messages → Task 5; offline human-decision preservation → Task 8.
+- **Scope:** No direct vehicle control, targeting, engagement, weapon optimization, or opaque AI ranking is introduced.
+
 ## Implementation Completion Gate
 
-Before claiming V1 complete, verify every acceptance criterion from the design spec maps to a passing test. Do not enable the feature by default until: route schema initializes, JANUS permissions are configured, NEXUS idempotency tests pass, replay determinism passes, security-context tests pass, and the full acceptance test passes. Then use `superpowers:verification-before-completion` before any completion claim.
+Before claiming V1 complete, verify every acceptance criterion from the design spec maps to a passing test. Do not enable the feature by default until route schema initializes, JANUS permissions are configured, NEXUS idempotency tests pass, replay determinism passes, security-context tests pass, disconnected decision-preservation passes, and the full acceptance test passes. Then use `superpowers:verification-before-completion` before any completion claim.
