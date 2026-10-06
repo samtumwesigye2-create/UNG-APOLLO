@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {"node_id":"A","coordinate":{"lat":0,"lon":0,"elevation_m":10}},
+    {"node_id":"B","coordinate":{"lat":0,"lon":1,"elevation_m":20}},
+    {"node_id":"C","coordinate":{"lat":1,"lon":0,"elevation_m":30}},
+    {"node_id":"E","coordinate":{"lat":-1,"lon":0,"elevation_m":15}},
+    {"node_id":"D","coordinate":{"lat":1,"lon":1,"elevation_m":25}}
+  ],
+  "edges": [
+    {"edge_id":"AB","from_node":"A","to_node":"B","distance_km":10,"route_type":"road","weather_cost":0.1,"terrain_cost":0.1,"comms_quality":0.9},
+    {"edge_id":"BD","from_node":"B","to_node":"D","distance_km":10,"route_type":"road","weather_cost":0.1,"terrain_cost":0.1,"comms_quality":0.9},
+    {"edge_id":"AC","from_node":"A","to_node":"C","distance_km":9,"route_type":"road","weather_cost":0.4,"terrain_cost":0.2,"comms_quality":0.8},
+    {"edge_id":"CD","from_node":"C","to_node":"D","distance_km":9,"route_type":"road","weather_cost":0.4,"terrain_cost":0.2,"comms_quality":0.8},
+    {"edge_id":"AE","from_node":"A","to_node":"E","distance_km":11,"route_type":"road","weather_cost":0.05,"terrain_cost":0.05,"comms_quality":0.95},
+    {"edge_id":"ED","from_node":"E","to_node":"D","distance_km":11,"route_type":"road","weather_cost":0.05,"terrain_cost":0.05,"comms_quality":0.95}
+  ]
+}
