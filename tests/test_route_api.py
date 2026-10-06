@@ -149,3 +149,21 @@ def test_replay_endpoint_requires_replay_permission(monkeypatch):
     c=client(monkeypatch,principal(['apollo.routes.replay']))
     r=c.get('/v1/routes/sessions/s1/replay',headers={'Authorization':'Bearer x'})
     assert r.status_code==200 and r.json()['replay_mode']=='exact'
+
+
+def test_current_janus_principal_can_use_configured_single_tenant_context(monkeypatch):
+    monkeypatch.setenv('APOLLO_DEFAULT_TENANT_ID','UNG')
+    actor=route_api._principal_security({'id':'p1','access_class':'corporate','permissions':['ung.admin']})
+    assert actor.tenant_id=='UNG'
+    assert actor.organization_id=='UNG'
+    assert actor.classification=='UNCLASSIFIED'
+
+
+def test_datasets_endpoint_returns_only_authorized_dataset_metadata(monkeypatch):
+    monkeypatch.setattr(route_api,'list_dataset_snapshots',lambda actor:[
+        {'dataset_id':'local-demo','version':'1','created_at':'2026-10-06T00:00:00Z','payload':{'dataset_id':'local-demo','version':'1','source_system':'TEST'}},
+    ])
+    c=client(monkeypatch,principal(['apollo.routes.read']))
+    r=c.get('/v1/routes/datasets',headers={'Authorization':'Bearer x'})
+    assert r.status_code==200
+    assert r.json()==[{'dataset_id':'local-demo','version':'1','source_system':'TEST','created_at':'2026-10-06T00:00:00Z'}]
