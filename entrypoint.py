@@ -3,13 +3,27 @@ from app import app
 from nexus_bridge import router as nexus_router
 from planning_kpis import router as planning_kpis_router
 from route_api import route_feature_enabled, route_storage_status, router as route_router
-from route_ui import router as route_ui_router
+from route_ui import COOKIE_NAME, router as route_ui_router
 from route_store import ensure_route_schema
 
 app.include_router(nexus_router)
 app.include_router(planning_kpis_router)
 app.include_router(route_router)
 app.include_router(route_ui_router)
+
+
+@app.middleware('http')
+async def route_workspace_cookie_auth(request, call_next):
+    path=request.url.path
+    if path.startswith('/v1/routes'):
+        has_auth=any(k.lower()==b'authorization' for k,v in request.scope.get('headers',[]))
+        token=request.cookies.get(COOKIE_NAME)
+        if token and not has_auth:
+            headers=list(request.scope.get('headers',[]))
+            headers.append((b'authorization',f'Bearer {token}'.encode('latin-1')))
+            request.scope['headers']=headers
+    return await call_next(request)
+
 
 @app.on_event('startup')
 def init_route_planning():
@@ -51,7 +65,7 @@ def root_status():
         'service': 'UNG-APOLLO',
         'name': 'Uganda National Grid Planning & Intelligence Platform',
         'status': 'online',
-        'version': '0.5.0',
+        'version': '0.6.0',
         'health': '/health',
         'readiness': '/ready',
         'system': '/v1/system',

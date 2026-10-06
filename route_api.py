@@ -36,13 +36,16 @@ def _authorize(permission: str, authorization: str | None):
 
 def _principal_security(principal: dict[str, Any]) -> SecurityContext:
     principal_id = str(principal.get('id') or principal.get('principal_id') or '').strip()
-    tenant_id = str(principal.get('tenant_id') or principal.get('organization_id') or '').strip()
+    explicit_tenant = principal.get('tenant_id') or principal.get('organization_id')
+    default_tenant = os.getenv('APOLLO_DEFAULT_TENANT_ID', '').strip()
+    tenant_id = str(explicit_tenant or default_tenant).strip()
     if not principal_id or not tenant_id:
         raise HTTPException(403, 'janus_security_context_incomplete')
+    organization_id = str(principal.get('organization_id') or tenant_id).strip()
     return SecurityContext(
         tenant_id=tenant_id,
         principal_id=principal_id,
-        organization_id=principal.get('organization_id'),
+        organization_id=organization_id,
         classification=principal.get('classification') or 'UNCLASSIFIED',
         compartments=list(principal.get('compartments') or []),
         sharing_policy=dict(principal.get('sharing_policy') or {}),
@@ -63,6 +66,13 @@ def plan_exists(plan_id: str) -> bool:
     from app import conn
     with conn() as c:
         return bool(c.execute('SELECT id FROM apollo_plans WHERE id=%s', (plan_id,)).fetchone())
+
+
+def list_dataset_snapshots(actor: SecurityContext) -> list[dict[str, Any]]:
+    from app import conn
+    with conn() as c:
+        rows = c.execute('SELECT dataset_id,version,payload,security_context,created_at FROM apollo_route_datasets ORDER BY dataset_id,created_at DESC').fetchall()
+    return [row for row in rows if security_context_allows(actor, row['security_context'])]
 
 
 def synthetic_test_dataset_payload() -> dict[str, Any]:
@@ -86,6 +96,22 @@ def route_context(authorization: str | None = Header(None)):
     _require_feature()
     _, actor = _authorized_context('apollo.routes.read', authorization)
     return actor.model_dump(mode='json')
+
+
+@router.get('/datasets')
+def datasets(authorization: str | None = Header(None)):
+    _require_feature()
+    _, actor = _authorized_context('apollo.routes.read', authorization)
+    result=[]
+    for row in list_dataset_snapshots(actor):
+        payload=_payload(row)
+        result.append({
+            'dataset_id': row.get('dataset_id') or payload.get('dataset_id'),
+            'version': row.get('version') or payload.get('version'),
+            'source_system': payload.get('source_system'),
+            'created_at': row.get('created_at'),
+        })
+    return result
 
 
 @router.post('/sessions', status_code=201)
