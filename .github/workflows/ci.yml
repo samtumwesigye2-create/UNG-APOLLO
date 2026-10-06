@@ -9,6 +9,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt
-      - run: python -m py_compile app.py route_models.py
+      - run: python -m py_compile app.py entrypoint.py nexus_bridge.py planning_kpis.py route_models.py route_store.py route_engine.py route_dataset_adapter.py route_windows.py route_replay.py route_events.py route_api.py route_ui.py route_observability.py
       - run: python -c "import app; assert app.health()['status']=='ok'"
       - run: python -m pytest -q
+      - run: docker build -t ung-apollo-route-v1 .

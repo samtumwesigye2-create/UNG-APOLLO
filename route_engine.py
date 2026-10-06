@@ -243,3 +243,27 @@ def generate_candidates(
     for index, cand in enumerate(candidates):
         cand.candidate_index = index
     return candidates
+
+# Observability wrappers keep the deterministic core pure while measuring calls.
+_generate_candidates_core = generate_candidates
+_score_candidate_core = score_candidate
+
+def score_candidate(candidate, dataset, profile, weights):
+    from route_observability import timed_operation
+    with timed_operation('route_scoring_latency'):
+        return _score_candidate_core(candidate, dataset, profile, weights)
+
+def generate_candidates(request, dataset, profile, max_alternatives):
+    from route_observability import metrics, timed_operation
+    with timed_operation('route_generation_latency'):
+        try:
+            result = _generate_candidates_core(request, dataset, profile, max_alternatives)
+        except RouteDataUnavailable:
+            metrics.increment('route_generation_failure', reason='data_unavailable')
+            raise
+        metrics.increment('route_candidates_generated', len(result))
+        for c in result:
+            if c.feasibility == 'rejected':
+                metrics.increment('route_candidates_rejected')
+                for reason in c.rejection_reasons: metrics.increment('route_constraint_rejection', reason=reason)
+        return result

@@ -12,26 +12,56 @@ def _parse(value: Any) -> datetime:
 
 
 def evaluate_departure_windows(
-    session: dict[str, Any], candidates: list[RouteCandidate], dataset: PlanningDataset, interval_minutes: int,
+    session: dict[str, Any],
+    candidates: list[RouteCandidate],
+    dataset: PlanningDataset,
+    interval_minutes: int,
 ) -> list[RouteWindowResult]:
-    if interval_minutes <= 0: raise ValueError('interval_minutes_must_be_positive')
+    if interval_minutes <= 0:
+        raise ValueError('interval_minutes_must_be_positive')
     window = (session.get('request') or {}).get('planning_window') or {}
     start = _parse(window['earliest_departure']); end = _parse(window['latest_departure'])
-    feasible = sorted([c for c in candidates if c.feasibility != 'rejected' and c.score is not None], key=lambda c: (c.score, c.candidate_id))
-    rows: list[RouteWindowResult] = []; at = start
+    feasible = sorted(
+        [c for c in candidates if c.feasibility != 'rejected' and c.score is not None],
+        key=lambda c: (c.score, c.candidate_id),
+    )
+    rows: list[RouteWindowResult] = []
+    at = start
     while at <= end:
         if feasible:
-            best = feasible[0]; weather_margin = max(0.0, 1.0 - float(best.metrics.get('weather_cost', 0.0)))
+            best = feasible[0]
+            weather_margin = max(0.0, 1.0 - float(best.metrics.get('weather_cost', 0.0)))
             rows.append(RouteWindowResult(
                 departure_time=at, candidate_id=best.candidate_id,
-                feasibility='feasible' if best.feasibility == 'feasible' else 'degraded', score=best.score,
-                metrics={'eta_minutes':best.metrics.get('eta_minutes'),'energy_estimate':best.metrics.get('energy_estimate'),'weather_margin':weather_margin},
+                feasibility='feasible' if best.feasibility == 'feasible' else 'degraded',
+                score=best.score,
+                metrics={
+                    'eta_minutes': best.metrics.get('eta_minutes'),
+                    'energy_estimate': best.metrics.get('energy_estimate'),
+                    'weather_margin': weather_margin,
+                },
                 data_version=dataset.version, confidence=dataset.confidence,
-                freshness={k:p.model_dump(mode='json') for k,p in dataset.optional_layer_provenance.items()},
+                freshness={k: p.model_dump(mode='json') for k,p in dataset.optional_layer_provenance.items()},
             ))
         else:
-            rows.append(RouteWindowResult(departure_time=at,feasibility='unavailable',score=None,metrics={'weather_margin':None},data_version=dataset.version,confidence=dataset.confidence))
+            rows.append(RouteWindowResult(
+                departure_time=at, feasibility='unavailable', score=None,
+                metrics={'weather_margin': None}, data_version=dataset.version,
+                confidence=dataset.confidence,
+            ))
         at += timedelta(minutes=interval_minutes)
-    ranked=[(r.score,r.departure_time,i) for i,r in enumerate(rows) if r.score is not None and r.feasibility!='unavailable']
-    if ranked: rows[min(ranked)[2]].recommended=True
+    if rows:
+        ranked = [(r.score, r.departure_time, i) for i,r in enumerate(rows) if r.score is not None and r.feasibility != 'unavailable']
+        if ranked:
+            _,_,idx=min(ranked)
+            rows[idx].recommended=True
     return rows
+
+_evaluate_departure_windows_core = evaluate_departure_windows
+
+def evaluate_departure_windows(session, candidates, dataset, interval_minutes):
+    from route_observability import metrics, timed_operation
+    with timed_operation('route_window_latency'):
+        result=_evaluate_departure_windows_core(session,candidates,dataset,interval_minutes)
+    metrics.increment('route_windows_evaluated',len(result))
+    return result

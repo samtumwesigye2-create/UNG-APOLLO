@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import route_api
+from route_models import SecurityContext
 
 
 def principal(perms=None, **overrides):
@@ -67,6 +68,7 @@ def test_valid_session_creation_201(monkeypatch):
     monkeypatch.setattr(route_api, 'plan_exists', lambda plan_id: True)
     monkeypatch.setattr(route_api, 'get_vehicle_profile', lambda *a, **k: {'payload': {'profile_id':'v1','version':'1','name':'V','mode':'ground','max_range_km':100,'cruise_speed_kph':60,'energy_per_km':1}})
     monkeypatch.setattr(route_api, 'create_session', lambda req, created_by, profile_version=None: {'id':'s1','plan_id':req.plan_id,'status':'draft'})
+    monkeypatch.setattr(route_api, 'queue_route_event', lambda *a, **k: {'id':'e'})
     c=client(monkeypatch, principal(['apollo.routes.write']))
     r=c.post('/v1/routes/sessions',json=body(),headers={'Authorization':'Bearer x'})
     assert r.status_code==201
@@ -108,6 +110,7 @@ def test_generation_contract(monkeypatch):
     monkeypatch.setattr(route_api, 'get_vehicle_profile', lambda *a, **k: {'payload': {'profile_id':'v1','version':'1','name':'V','mode':'ground','max_range_km':100,'cruise_speed_kph':60,'energy_per_km':1}})
     monkeypatch.setattr(route_api, 'generate_candidates', lambda *a, **k: [route_api.RouteCandidate.model_validate(candidate)])
     monkeypatch.setattr(route_api, 'save_candidates', lambda *a, **k: [])
+    monkeypatch.setattr(route_api, 'queue_route_event', lambda *a, **k: {'id':'e'})
     c=client(monkeypatch, principal(['apollo.routes.generate']))
     r=c.post('/v1/routes/sessions/s1/generate',headers={'Authorization':'Bearer x'})
     assert r.status_code==200
@@ -121,3 +124,28 @@ def test_feature_flag_disabled(monkeypatch):
     app=FastAPI(); app.include_router(route_api.router); c=TestClient(app)
     r=c.post('/v1/routes/sessions',json=body(),headers={'Authorization':'Bearer x'})
     assert r.status_code==503
+
+
+def test_decision_preserves_manual_override(monkeypatch):
+    session={'id':'s1','request':body(),'vehicle_profile_id':'v1','vehicle_profile_version':'1'}
+    monkeypatch.setattr(route_api,'get_session',lambda *a,**k:session)
+    monkeypatch.setattr(route_api,'list_candidates',lambda *a,**k:[
+        {'payload':{'candidate_id':'top','candidate_index':0,'node_sequence':['A','D'],'edge_sequence':['AD'],'geometry':{'type':'LineString','coordinates':[]},'metrics':{},'score':0.1,'score_breakdown':{},'feasibility':'feasible','rejection_reasons':[],'explanation':'top'}},
+        {'payload':{'candidate_id':'other','candidate_index':1,'node_sequence':['A','D'],'edge_sequence':['AD'],'geometry':{'type':'LineString','coordinates':[]},'metrics':{},'score':0.2,'score_breakdown':{},'feasibility':'feasible','rejection_reasons':[],'explanation':'other'}},
+    ])
+    recorded=[]; events=[]
+    monkeypatch.setattr(route_api,'record_decision',lambda *a,**k:recorded.append((a,k)) or {'id':'d1','decision_type':'select','candidate_id':'other'})
+    monkeypatch.setattr(route_api,'queue_route_event',lambda *a,**k:events.append((a,k)) or {'id':'e'})
+    c=client(monkeypatch,principal(['apollo.routes.decide']))
+    r=c.post('/v1/routes/sessions/s1/decisions',json={'decision_type':'select','candidate_id':'other','rationale':'operator preference'},headers={'Authorization':'Bearer x'})
+    assert r.status_code==201
+    assert recorded
+    assert any('MANUAL_OVERRIDE' in a[1] for a,k in events)
+
+
+def test_replay_endpoint_requires_replay_permission(monkeypatch):
+    monkeypatch.setattr(route_api,'build_replay_bundle',lambda *a,**k:type('B',(),{'replay_mode':'exact','model_dump':lambda self,mode=None:{'session_id':'s1','replay_mode':'exact'}})())
+    monkeypatch.setattr(route_api,'queue_route_event',lambda *a,**k:{})
+    c=client(monkeypatch,principal(['apollo.routes.replay']))
+    r=c.get('/v1/routes/sessions/s1/replay',headers={'Authorization':'Bearer x'})
+    assert r.status_code==200 and r.json()['replay_mode']=='exact'

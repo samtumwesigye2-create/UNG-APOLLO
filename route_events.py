@@ -15,7 +15,6 @@ def route_event_exists(idempotency_key: str) -> bool:
     with route_store._connection_factory() as c:
         return bool(c.execute('SELECT id FROM apollo_route_events WHERE idempotency_key=%s', (idempotency_key,)).fetchone())
 
-
 ROUTE_SNAPSHOT_TYPES = {
     'APOLLO.ROUTE.GRAPH_SNAPSHOT', 'APOLLO.ROUTE.WEATHER_SNAPSHOT',
     'APOLLO.ROUTE.TERRAIN_SNAPSHOT', 'APOLLO.ROUTE.GEOFENCE_SNAPSHOT',
@@ -47,7 +46,7 @@ def ingest_route_snapshot(message_type: str, payload: dict[str, Any], message_id
         if profile_payload:
             profile = VehicleProfile.model_validate(profile_payload)
         else:
-            profile = VehicleProfile(profile_id='adapter-default',version='1',name='Adapter',mode='simulation',max_range_km=1e9,cruise_speed_kph=1,energy_per_km=1,metadata={'optional_layers': list((clean.get('optional_snapshots') or {}).keys())})
+            profile = VehicleProfile(profile_id='adapter-default',version='1',name='Adapter',mode='simulation',max_range_km=1e9,cruise_speed_kph=1,energy_per_km=1,metadata={'optional_layers': ['weather','terrain','geofence','comms']})
         dataset = build_planning_dataset(clean, clean.get('optional_snapshots') or {}, profile)
         row = save_dataset_snapshot(dataset, source_message_id=message_id)
         return {'accepted': True, 'duplicate': False, 'kind': 'dataset', 'record': row, 'dataset_id': dataset.dataset_id, 'version': dataset.version}
@@ -86,3 +85,13 @@ def flush_route_outbox(authorization: str | None, limit: int = 100) -> dict[str,
             mark_outbox_delivered(row['id'])
             delivered += 1
     return {'delivered': delivered, 'failed': failed}
+
+_flush_route_outbox_core = flush_route_outbox
+
+def flush_route_outbox(authorization: str | None, limit: int = 100) -> dict[str, int]:
+    from route_observability import metrics, timed_operation
+    with timed_operation('route_outbox_flush_latency'):
+        result=_flush_route_outbox_core(authorization,limit)
+    metrics.increment('route_outbox_delivered',result['delivered'])
+    metrics.increment('route_outbox_failures',result['failed'])
+    return result

@@ -86,6 +86,9 @@ def build_planning_dataset(
     missing = sorted(set(expected) - set(layer_prov))
     penalties += 0.1 * len(missing)
     confidence = max(0.0, min(confidences) - 0.1 * len(missing) - 0.05 * sum(1 for p in layer_prov.values() if p.stale))
+    from route_observability import metrics
+    metrics.increment('route_layers_missing', len(missing))
+    metrics.increment('route_layers_stale', sum(1 for p in layer_prov.values() if p.stale))
     security = SecurityContext.model_validate(graph_snapshot.get('security_context') or {
         'tenant_id': 'system', 'principal_id': 'UNG-NEXUS'
     })
