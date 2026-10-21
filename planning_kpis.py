@@ -2,9 +2,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
-from app import auth, conn
 
-router=APIRouter(prefix='/v1/kpis',tags=['Planning KPIs'])
 def now(): return datetime.now(timezone.utc)
 def ensure_schema():
     with conn() as c:
